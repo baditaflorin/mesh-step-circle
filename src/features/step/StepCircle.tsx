@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useStepCount, useVibration } from "@baditaflorin/mesh-common";
 import { createRoomSync } from "../sync/yjsRoom";
 import { maybeFetchTurnCredentials } from "../sync/iceConfig";
 
@@ -17,33 +18,26 @@ type Props = {
   vibrationStrength: number;
 };
 
-type DeviceMotionRequest = {
-  requestPermission?: () => Promise<"granted" | "denied">;
-};
-
 const STEP_DEBOUNCE_MS = 300;
 const MIN_PEAK_ACCEL = 1.2; // m/s^2 — gating above filtered noise floor
 
 export function StepCircle({ roomId, myPeerId, myName, stayTogether, vibrationStrength }: Props) {
   const [armed, setArmed] = useState(false);
   const [walkers, setWalkers] = useState<Map<string, Walker>>(new Map());
-  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const stepState = useStepCount({
+    armed,
+    threshold: MIN_PEAK_ACCEL,
+    minStepMs: STEP_DEBOUNCE_MS,
+  });
+  const permissionError = stepState.error;
+  const haptic = useVibration();
 
   const mesh = useMemo(() => {
     if (!armed) return null;
     return createRoomSync(roomId);
   }, [armed, roomId]);
 
-  const myStepsRef = useRef(0);
   const lastStepAtRef = useRef(0);
-  const stepTimesRef = useRef<number[]>([]);
-  // Band-pass filter state (two-stage HPF + LPF), sampling-rate-adaptive
-  const filtStateRef = useRef({
-    lastSample: 0,
-    lastFilt: 0,
-    smoothed: 0,
-    prevSign: 0,
-  });
 
   useEffect(() => {
     if (!armed) return;
@@ -56,88 +50,22 @@ export function StepCircle({ roomId, myPeerId, myName, stayTogether, vibrationSt
     };
   }, [mesh]);
 
-  // DeviceMotion: detect steps via band-passed accel + zero-up-crossing
+  // Publish on each detected step.
   useEffect(() => {
-    if (!armed || !mesh) return undefined;
-    let cancelled = false;
-    let onMotion: ((e: DeviceMotionEvent) => void) | null = null;
-
-    const start = async () => {
-      const req = (window as unknown as { DeviceMotionEvent?: DeviceMotionRequest })
-        .DeviceMotionEvent;
-      if (req?.requestPermission) {
-        try {
-          const result = await req.requestPermission();
-          if (result !== "granted") {
-            setPermissionError("Motion permission denied — steps can't be counted.");
-            return;
-          }
-        } catch (err) {
-          setPermissionError(`Motion permission error: ${err}`);
-          return;
-        }
-      }
-      if (cancelled) return;
-
-      const walkersMap = mesh.doc.getMap<Walker>("walkers");
-
-      onMotion = (e: DeviceMotionEvent) => {
-        const a = e.accelerationIncludingGravity ?? e.acceleration;
-        if (!a) return;
-        const ax = a.x ?? 0,
-          ay = a.y ?? 0,
-          az = a.z ?? 0;
-        const mag = Math.sqrt(ax * ax + ay * ay + az * az);
-        // Subtract gravity baseline (when using accelerationIncludingGravity).
-        const raw = mag - 9.81;
-
-        const s = filtStateRef.current;
-        // Simple band-pass: HPF (subtract slow-moving mean) then LPF (smooth fast noise).
-        // alphaHP ≈ 0.92 ≈ 1-3 Hz pass-band at ~60 Hz sample rate.
-        const meanAlpha = 0.95;
-        s.smoothed = meanAlpha * s.smoothed + (1 - meanAlpha) * raw;
-        const hp = raw - s.smoothed;
-        const lpAlpha = 0.4;
-        const filt = lpAlpha * hp + (1 - lpAlpha) * s.lastFilt;
-        const prevFilt = s.lastFilt;
-        s.lastFilt = filt;
-
-        // Zero-up-crossing with amplitude gate.
-        const now = Date.now();
-        const peakAround = Math.max(Math.abs(filt), Math.abs(prevFilt));
-        if (
-          prevFilt < 0 &&
-          filt >= 0 &&
-          peakAround > MIN_PEAK_ACCEL &&
-          now - lastStepAtRef.current > STEP_DEBOUNCE_MS
-        ) {
-          lastStepAtRef.current = now;
-          myStepsRef.current += 1;
-          stepTimesRef.current.push(now);
-          // keep last 10s of step timestamps for cadence
-          const cutoff = now - 10_000;
-          stepTimesRef.current = stepTimesRef.current.filter((t) => t > cutoff);
-
-          const cadence = computeCadenceSpm(stepTimesRef.current);
-          const next: Walker = {
-            name: myName,
-            steps: myStepsRef.current,
-            lastStepAt: now,
-            cadenceSpm: cadence,
-          };
-          mesh.doc.transact(() => walkersMap.set(myPeerId, next));
-        }
-      };
-      window.addEventListener("devicemotion", onMotion);
+    if (!armed || !mesh) return;
+    if (stepState.steps === 0) return;
+    const now = Date.now();
+    lastStepAtRef.current = now;
+    const walkersMap = mesh.doc.getMap<Walker>("walkers");
+    const next: Walker = {
+      name: myName,
+      steps: stepState.steps,
+      lastStepAt: now,
+      cadenceSpm: stepState.cadence,
     };
-
-    void start();
-
-    return () => {
-      cancelled = true;
-      if (onMotion) window.removeEventListener("devicemotion", onMotion);
-    };
-  }, [armed, mesh, myPeerId, myName]);
+    mesh.doc.transact(() => walkersMap.set(myPeerId, next));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [armed, mesh, myPeerId, myName, stepState.steps]);
 
   // Subscribe to Yjs walkers map
   useEffect(() => {
@@ -159,17 +87,16 @@ export function StepCircle({ roomId, myPeerId, myName, stayTogether, vibrationSt
     const i = setInterval(() => {
       const map = mesh.doc.getMap<Walker>("walkers");
       const existing = map.get(myPeerId);
-      const cadence = computeCadenceSpm(stepTimesRef.current);
       const next: Walker = {
         name: myName,
-        steps: existing?.steps ?? myStepsRef.current,
-        lastStepAt: existing?.lastStepAt ?? 0,
-        cadenceSpm: cadence,
+        steps: existing?.steps ?? stepState.steps,
+        lastStepAt: existing?.lastStepAt ?? lastStepAtRef.current,
+        cadenceSpm: stepState.cadence,
       };
       mesh.doc.transact(() => map.set(myPeerId, next));
     }, 2000);
     return () => clearInterval(i);
-  }, [mesh, myPeerId, myName]);
+  }, [mesh, myPeerId, myName, stepState.steps, stepState.cadence]);
 
   // "Stay together": if cadence stddev > 25 spm AND I'm below the mean, vibrate gently.
   useEffect(() => {
@@ -187,11 +114,11 @@ export function StepCircle({ roomId, myPeerId, myName, stayTogether, vibrationSt
       if (!me) return;
       if (stddev > 25 && me.cadenceSpm < mean - 10) {
         const ms = Math.round(80 + 120 * vibrationStrength);
-        if ("vibrate" in navigator) navigator.vibrate?.(ms);
+        haptic.vibrate(ms);
       }
     }, 4000);
     return () => clearInterval(interval);
-  }, [stayTogether, mesh, walkers, myPeerId, vibrationStrength]);
+  }, [stayTogether, mesh, walkers, myPeerId, vibrationStrength, haptic]);
 
   if (!armed) {
     return (
@@ -238,11 +165,4 @@ export function StepCircle({ roomId, myPeerId, myName, stayTogether, vibrationSt
       </ul>
     </div>
   );
-}
-
-function computeCadenceSpm(times: number[]): number {
-  if (times.length < 2) return 0;
-  const span = (times[times.length - 1]! - times[0]!) / 1000; // seconds
-  if (span < 1) return 0;
-  return (times.length - 1) * (60 / span);
 }
