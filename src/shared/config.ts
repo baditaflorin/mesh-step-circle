@@ -1,6 +1,9 @@
 export const appConfig = {
   appName: "mesh-step-circle",
   storagePrefix: "mesh-step-circle",
+  description:
+    "Peer-to-peer mesh walking circle. Phones nudge with haptics when you fall behind the group's pace, no leader required.",
+  accentHex: "#5fcf91",
   version: __APP_VERSION__,
   commit: __GIT_COMMIT__,
   repositoryUrl: "https://github.com/baditaflorin/mesh-step-circle",

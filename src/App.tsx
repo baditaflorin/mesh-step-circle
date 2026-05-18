@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
+import { MeshShell } from "@baditaflorin/mesh-common";
 import { StepCircle } from "./features/step/StepCircle";
-import { SettingsDrawer } from "./features/settings/SettingsDrawer";
+import { SettingsExtras } from "./features/settings/SettingsExtras";
 import { appConfig } from "./shared/config";
-import { InviteShareButton, MeshBeacon } from "@baditaflorin/mesh-common";
 
 const STORAGE = {
   room: `${appConfig.storagePrefix}:room`,
@@ -55,7 +55,6 @@ export function App() {
   const [myName, setMyName] = useState(() => readString(STORAGE.name, randomWalkerName()));
   const [stayTogether, setStayTogether] = useState(() => readBool(STORAGE.stayTogether, true));
   const [vibration, setVibration] = useState(() => readNumber(STORAGE.vibration, 0.5));
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [myPeerId] = useState(() => ensurePeerId());
 
   useEffect(() => {
@@ -72,7 +71,21 @@ export function App() {
   }, [vibration]);
 
   return (
-    <div className="app-root">
+    <MeshShell
+      config={appConfig}
+      roomId={roomId}
+      onRoomChange={setRoomId}
+      settingsExtras={
+        <SettingsExtras
+          myName={myName}
+          onNameChange={setMyName}
+          stayTogether={stayTogether}
+          onStayTogetherChange={setStayTogether}
+          vibration={vibration}
+          onVibrationChange={setVibration}
+        />
+      }
+    >
       <StepCircle
         roomId={roomId}
         myPeerId={myPeerId}
@@ -80,45 +93,6 @@ export function App() {
         stayTogether={stayTogether}
         vibrationStrength={vibration}
       />
-
-      <InviteShareButton appName={appConfig.appName} roomId={roomId} />
-      <MeshBeacon app={appConfig.appName} room={roomId} />
-
-      <button
-        type="button"
-        className="settings-fab"
-        onClick={() => setSettingsOpen(true)}
-        aria-label="Open settings"
-      >
-        ⚙
-      </button>
-
-      <div className="self-ref">
-        <a href={appConfig.repositoryUrl} target="_blank" rel="noreferrer">
-          source
-        </a>
-        <span aria-hidden="true">·</span>
-        <a href={appConfig.paypalUrl} target="_blank" rel="noreferrer">
-          tip ♥
-        </a>
-        <span aria-hidden="true">·</span>
-        <span>
-          v{appConfig.version} · {appConfig.commit}
-        </span>
-      </div>
-
-      <SettingsDrawer
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        roomId={roomId}
-        onRoomChange={setRoomId}
-        myName={myName}
-        onNameChange={setMyName}
-        stayTogether={stayTogether}
-        onStayTogetherChange={setStayTogether}
-        vibration={vibration}
-        onVibrationChange={setVibration}
-      />
-    </div>
+    </MeshShell>
   );
 }
